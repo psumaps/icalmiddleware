@@ -1,12 +1,11 @@
-displayName: Demo Plugin
+displayName: ICal middleware
 type: middleware
 iconPath: .assets/icon.png
 
-import: github.com/traefik/plugindemo
+import: github.com/psumaps/icalmiddleware
 
-summary: '[Demo] Add Request Header'
+summary: '[Auth] Authorize though ical endpoint'
 
 testData:
-  Headers:
-    X-Demo: test
-    X-URL: '{{URL}}'
+  HeaderName: Authorization
+
