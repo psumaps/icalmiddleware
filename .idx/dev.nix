@@ -7,7 +7,9 @@
   packages = [
     pkgs.go
     pkgs.air
+    pkgs.docker
   ];
+  services.docker.enable = true;
   # Sets environment variables in the workspace
   env = {};
   idx = {

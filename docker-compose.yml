@@ -1,0 +1,22 @@
+services:
+  traefik:
+    image: "traefik:v3.0.0"
+    container_name: "traefik"
+    restart: unless-stopped
+    command:
+      - "--log.level=DEBUG"
+      - "--accesslog"
+      - "--accesslog.filepath=/var/log/traefik/access.log"
+      - "--api.insecure=true"
+      - "--api.dashboard=true"
+      #- "--providers.docker=true"
+      #- "--providers.docker.exposedbydefault=false"
+      - "--providers.file.filename=/plugins-local/src/github.com/psumaps/icalmiddleware/traefik/config.yml"
+      - "--entrypoints.web.address=:80"
+      - "--experimental.localplugins.icalmiddleware.modulename=github.com/psumaps/icalmiddleware"
+    volumes:
+  #    - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./:/plugins-local/src/github.com/psumaps/icalmiddleware
+    ports:
+      - 8000:80
+      - 8080:8080
