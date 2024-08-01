@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"time"
 )
@@ -13,6 +15,7 @@ type Config struct {
 	ForwardToken bool   `json:"forwardToken,omitempty"`
 	Freshness    int64  `json:"freshness,omitempty"`
 	HeaderName   string `json:"headerName,omitempty"`
+	AllowSubnet  string `json:"allowSubnet,omitempty"`
 }
 
 func CreateConfig() *Config {
@@ -20,6 +23,7 @@ func CreateConfig() *Config {
 		HeaderName:   "Authorization",
 		ForwardToken: false,
 		Freshness:    3600,
+		AllowSubnet:  "0.0.0.0/24",
 	}
 }
 
@@ -28,31 +32,32 @@ type ICalMiddleware struct {
 	headerName   string
 	forwardToken bool
 	freshness    int64
-	cache        map[string]time.Time
+	cache        *Cache
+	allowSubnet  netip.Prefix
 	name         string
 }
 
 func New(_ context.Context, next http.Handler, config *Config, name string) (http.Handler, error) {
+	network, err := netip.ParsePrefix(config.AllowSubnet)
+	if err != nil {
+		return nil, fmt.Errorf("subnet parse error: %v", err)
+	}
+
+	cache := NewCache(time.Duration(config.Freshness)*time.Second, 8*time.Hour)
+
 	return &ICalMiddleware{
 		headerName:   config.HeaderName,
 		forwardToken: config.ForwardToken,
 		freshness:    config.Freshness,
+		allowSubnet:  network,
 		next:         next,
-		cache:        make(map[string]time.Time),
+		cache:        cache,
 		name:         name,
 	}, nil
 }
 
-func (plugin *ICalMiddleware) getCached(key string) bool {
-	item, found := plugin.cache[key]
-	if found && time.Now().Before(item) {
-		return true
-	}
-	return false
-}
-
 func (plugin *ICalMiddleware) setCache(key string) {
-	plugin.cache[key] = time.Now().Add(time.Duration(plugin.freshness) * time.Second)
+	plugin.cache.Set(key, true, 0)
 }
 
 func (plugin *ICalMiddleware) httpRequestAndCache(url string) error {
@@ -101,18 +106,43 @@ func (plugin *ICalMiddleware) extractTokenFromHeader(request *http.Request) stri
 	return token
 }
 
+func ReadUserIP(r *http.Request) string {
+	IPAddress := r.Header.Get("X-Real-Ip")
+	if IPAddress == "" {
+		IPAddress = r.Header.Get("X-Forwarded-For")
+	}
+	if IPAddress == "" {
+		IPAddress, _, _ = net.SplitHostPort(r.RemoteAddr)
+	}
+	return IPAddress
+}
+
+func (plugin *ICalMiddleware) containsSubnet(address string) bool {
+	ip, err := netip.ParseAddr(address)
+	if err != nil {
+		fmt.Printf("Invalid addr: %v", err)
+		return false
+	}
+	fmt.Printf("%v contains %v %v\n", ip, plugin.allowSubnet, plugin.allowSubnet.Contains(ip))
+	return plugin.allowSubnet.Contains(ip)
+}
+
 // validate validates the request and returns the HTTP status code or an error if the request is not valid. It also sets any headers that should be forwarded to the backend.
 func (plugin *ICalMiddleware) validate(request *http.Request) (int, error) {
-	token := plugin.extractTokenFromHeader(request)
-	if token == "" {
-		// No token provided
-		return http.StatusUnauthorized, fmt.Errorf("no token provided")
-	} else if !plugin.getCached(token) {
-		// Token provided
-		err := plugin.httpRequestAndCache(token)
-		if err != nil {
-			return http.StatusUnauthorized, err
+	if !plugin.containsSubnet(ReadUserIP(request)) {
+		token := plugin.extractTokenFromHeader(request)
+		if token == "" {
+			// No token provided
+			fmt.Println("No token provided")
+			return http.StatusUnauthorized, fmt.Errorf("no token provided")
+		} else if !(plugin.cache.Has(token)) {
+			// Token provided
+			err := plugin.httpRequestAndCache(token)
+			if err != nil {
+				return http.StatusUnauthorized, err
+			}
 		}
+		fmt.Println("Token found in cache")
 	}
 	return http.StatusOK, nil
 }
