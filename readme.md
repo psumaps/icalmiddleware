@@ -44,6 +44,9 @@ http:
       plugin:
         icalmiddleware:
           HeaderName:   "Authorization"
+          AllowSubnet:  "0.0.0.0/24"
+          Freshness:    3600
+          ForwardToken: false
 ```
 
 ### Local Mode

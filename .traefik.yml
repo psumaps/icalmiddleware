@@ -1,6 +1,5 @@
 displayName: ICal middleware
 type: middleware
-iconPath: .assets/icon.png
 
 import: github.com/psumaps/icalmiddleware
 
@@ -8,4 +7,5 @@ summary: '[Auth] Authorize though ical endpoint'
 
 testData:
   HeaderName: Authorization
+  AllowSubnet:  "0.0.0.0/24"
 
