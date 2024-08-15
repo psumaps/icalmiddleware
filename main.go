@@ -150,11 +150,13 @@ func (plugin *ICalMiddleware) validate(request *http.Request) (int, error) {
 func (plugin *ICalMiddleware) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	_, err := plugin.validate(req)
 	if err != nil {
-		rw.Header().Add("Cache-Control", "no-cache")
-		rw.Header().Add("Access-Control-Allow-Origin", "*")
-		rw.Header().Add("Access-Control-Allow-Headers", "*")
-		rw.Header().Add("Access-Control-Allow-Headers", "*")
-		rw.Header().Add("Access-Control-Max-Age", "0")
+		origin := req.Header.Get("Origin")
+		if origin != "" {
+			rw.Header().Add("Cache-Control", "no-cache")
+			rw.Header().Add("Access-Control-Allow-Origin", origin)
+			rw.Header().Add("Access-Control-Allow-Headers", "*")
+			rw.Header().Add("Access-Control-Max-Age", "0")
+		}
 		http.Error(rw, "Unauthorized. Attach valid ICal ETIS token in "+plugin.headerName+" header", http.StatusUnauthorized)
 		return
 	}
