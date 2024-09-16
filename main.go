@@ -1,6 +1,7 @@
 package icalmiddleware
 
 import (
+	"container/list"
 	"context"
 	"fmt"
 	"io"
@@ -12,10 +13,10 @@ import (
 )
 
 type Config struct {
-	ForwardToken bool   `json:"forwardToken,omitempty"`
-	Freshness    int64  `json:"freshness,omitempty"`
-	HeaderName   string `json:"headerName,omitempty"`
-	AllowSubnet  string `json:"allowSubnet,omitempty"`
+	ForwardToken bool     `json:"forwardToken,omitempty"`
+	Freshness    int64    `json:"freshness,omitempty"`
+	HeaderName   string   `json:"headerName,omitempty"`
+	AllowSubnet  []string `json:"allowSubnet,omitempty"`
 }
 
 func CreateConfig() *Config {
@@ -23,7 +24,7 @@ func CreateConfig() *Config {
 		HeaderName:   "Authorization",
 		ForwardToken: false,
 		Freshness:    3600,
-		AllowSubnet:  "0.0.0.0/24",
+		AllowSubnet:  []string{"0.0.0.0/24"},
 	}
 }
 
@@ -33,14 +34,27 @@ type ICalMiddleware struct {
 	forwardToken bool
 	freshness    int64
 	cache        *Cache
-	allowSubnet  netip.Prefix
+	allowSubnet  []netip.Prefix
 	name         string
 }
 
 func New(_ context.Context, next http.Handler, config *Config, name string) (http.Handler, error) {
-	network, err := netip.ParsePrefix(config.AllowSubnet)
-	if err != nil {
-		return nil, fmt.Errorf("subnet parse error: %v", err)
+	cidrList := list.New()
+	for _, cidr := range config.AllowSubnet {
+		prefix, err := netip.ParsePrefix(cidr)
+		if err != nil {
+			fmt.Printf("Subnet parse error %s: %v\n", cidr, err)
+		} else {
+			cidrList.PushBack(prefix)
+		}
+	}
+
+	cidrs := make([]netip.Prefix, cidrList.Len())
+
+	i := 0
+	for e := cidrList.Front(); e != nil; e = e.Next() {
+		cidrs[i] = e.Value.(netip.Prefix)
+		i++
 	}
 
 	cache := NewCache(time.Duration(config.Freshness)*time.Second, 8*time.Hour)
@@ -49,7 +63,7 @@ func New(_ context.Context, next http.Handler, config *Config, name string) (htt
 		headerName:   config.HeaderName,
 		forwardToken: config.ForwardToken,
 		freshness:    config.Freshness,
-		allowSubnet:  network,
+		allowSubnet:  cidrs,
 		next:         next,
 		cache:        cache,
 		name:         name,
@@ -123,15 +137,24 @@ func (plugin *ICalMiddleware) containsSubnet(address string) bool {
 		fmt.Printf("Invalid addr: %v", err)
 		return false
 	}
-	fmt.Printf("%v contains %v %v\n", ip, plugin.allowSubnet, plugin.allowSubnet.Contains(ip))
-	return plugin.allowSubnet.Contains(ip)
+
+	var flag bool
+	for _, prefix := range plugin.allowSubnet {
+		flag = prefix.Contains(ip)
+		if flag {
+			fmt.Printf("%v contains %v\n", prefix, ip)
+			break
+		}
+	}
+
+	return flag
 }
 
 // validate validates the request and returns the HTTP status code or an error if the request is not valid. It also sets any headers that should be forwarded to the backend.
 func (plugin *ICalMiddleware) validate(request *http.Request) (int, error) {
 	if !plugin.containsSubnet(ReadUserIP(request)) {
 		token := plugin.extractTokenFromHeader(request)
-		if token == "" {
+		if len(token) != 16 {
 			// No token provided
 			fmt.Println("No token provided")
 			return http.StatusUnauthorized, fmt.Errorf("no token provided")

@@ -15,7 +15,7 @@ experimental:
   plugins:
     icalmiddleware:
       moduleName: github.com/psumaps/icalmiddleware
-      version: v0.0.1
+      version: v0.0.5
 ```
 
 Here is an example of a file provider dynamic configuration (given here in YAML), where the interesting part is the `http.middlewares` section:
@@ -44,7 +44,8 @@ http:
       plugin:
         icalmiddleware:
           HeaderName:   "Authorization"
-          AllowSubnet:  "0.0.0.0/24"
+          AllowSubnet:  
+            - "0.0.0.0/24"
           Freshness:    3600
           ForwardToken: false
 ```

@@ -7,5 +7,5 @@ summary: '[Auth] Authorize though ical endpoint'
 
 testData:
   HeaderName: Authorization
-  AllowSubnet:  "0.0.0.0/24"
-
+  AllowSubnet:  
+    - "0.0.0.0/24"
