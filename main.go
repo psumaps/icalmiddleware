@@ -1,7 +1,6 @@
 package icalmiddleware
 
 import (
-	"container/list"
 	"context"
 	"fmt"
 	"io"
@@ -17,6 +16,7 @@ type Config struct {
 	Freshness    int64    `json:"freshness,omitempty"`
 	HeaderName   string   `json:"headerName,omitempty"`
 	AllowSubnet  []string `json:"allowSubnet,omitempty"`
+	Timeout      int64    `json:"timeout,omitempty"`
 }
 
 func CreateConfig() *Config {
@@ -25,6 +25,7 @@ func CreateConfig() *Config {
 		ForwardToken: false,
 		Freshness:    3600,
 		AllowSubnet:  []string{"0.0.0.0/24"},
+		Timeout:      5,
 	}
 }
 
@@ -35,28 +36,28 @@ type ICalMiddleware struct {
 	freshness    int64
 	cache        *Cache
 	allowSubnet  []netip.Prefix
+	timeout      time.Duration
 	name         string
 }
 
 func New(_ context.Context, next http.Handler, config *Config, name string) (http.Handler, error) {
-	cidrList := list.New()
+	var cidrs []netip.Prefix
 	for _, cidr := range config.AllowSubnet {
 		prefix, err := netip.ParsePrefix(cidr)
 		if err != nil {
-			fmt.Printf("Subnet parse error %s: %v\n", cidr, err)
-		} else {
-			cidrList.PushBack(prefix)
+			fmt.Printf("[ERROR] [%s] Неверная подсеть '%s': %v\n", name, cidr, err)
+			continue
 		}
+		cidrs = append(cidrs, prefix)
+	}
+	if len(cidrs) == 0 {
+		return nil, fmt.Errorf("не предоставлено ни одной валидной подсети")
 	}
 
-	cidrs := make([]netip.Prefix, cidrList.Len())
-
-	i := 0
-	for e := cidrList.Front(); e != nil; e = e.Next() {
-		cidrs[i] = e.Value.(netip.Prefix)
-		i++
+	timeout := time.Duration(config.Timeout) * time.Second
+	if timeout <= 0 {
+		timeout = 5 * time.Second
 	}
-
 	cache := NewCache(time.Duration(config.Freshness)*time.Second, 8*time.Hour)
 
 	return &ICalMiddleware{
@@ -66,6 +67,7 @@ func New(_ context.Context, next http.Handler, config *Config, name string) (htt
 		allowSubnet:  cidrs,
 		next:         next,
 		cache:        cache,
+		timeout:      timeout,
 		name:         name,
 	}, nil
 }
@@ -75,48 +77,55 @@ func (plugin *ICalMiddleware) setCache(key string) {
 }
 
 func (plugin *ICalMiddleware) httpRequestAndCache(url string) error {
-	response, err := http.Get("https://ical.psu.ru/calendars/" + url)
+	fullURL := "https://ical.psu.ru/calendars/" + url
+	ctx, cancel := context.WithTimeout(context.Background(), plugin.timeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fullURL, nil)
 	if err != nil {
-		return fmt.Errorf("request error: %v", err)
+		return fmt.Errorf("[ERROR] [%s] Ошибка создания запроса для %s: %v", plugin.name, fullURL, err)
+	}
+
+	response, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("[ERROR] [%s] Ошибка запроса для %s: %v", plugin.name, fullURL, err)
 	}
 	defer response.Body.Close()
 
 	body := make([]byte, 20)
-
 	_, err = io.ReadAtLeast(response.Body, body, 20)
 	if err != nil {
-		return fmt.Errorf("read error: %v", err)
+		return fmt.Errorf("[ERROR] [%s] Ошибка чтения ответа для %s: %v", plugin.name, fullURL, err)
 	}
 
 	result := string(body)
-
 	if strings.HasPrefix(result, "BEGIN") {
 		plugin.setCache(url)
-		fmt.Println("Request valid")
+		fmt.Printf("[DEBUG] [%s] Валидный ответ получен для токена: %s\n", plugin.name, url)
 	} else {
-		fmt.Println("Request invalid")
-		return fmt.Errorf("request invalid")
+		fmt.Printf("[DEBUG] [%s] Невалидный ответ для токена: %s. Ответ: %s\n", plugin.name, url, result)
+		return fmt.Errorf("[ERROR] [%s] Запрос невалиден для токена: %s", plugin.name, url)
 	}
 
 	return nil
 }
 
-// extractTokenFromHeader extracts the token from the header. If the token is found, it is removed from the header unless forwardToken is true.
+
 func (plugin *ICalMiddleware) extractTokenFromHeader(request *http.Request) string {
-	header, ok := request.Header[plugin.headerName]
-	if !ok {
+	canonicalHeaderName := http.CanonicalHeaderKey(plugin.headerName)
+	token := request.Header.Get(canonicalHeaderName)
+	if token == "" {
 		return ""
 	}
 
-	token := header[0]
+	if len(token) > 7 && strings.EqualFold(token[:7], "Bearer ") {
+		token = token[7:]
+	}
 
 	if !plugin.forwardToken {
-		request.Header.Del(plugin.headerName)
+		request.Header.Del(canonicalHeaderName)
 	}
 
-	if strings.HasPrefix(token, "Bearer ") {
-		return token[7:]
-	}
 	return token
 }
 
@@ -134,44 +143,52 @@ func ReadUserIP(r *http.Request) string {
 func (plugin *ICalMiddleware) containsSubnet(address string) bool {
 	ip, err := netip.ParseAddr(address)
 	if err != nil {
-		fmt.Printf("Invalid addr: %v", err)
+		fmt.Printf("[ERROR] [%s] Неверный IP '%s': %v\n", plugin.name, address, err)
 		return false
 	}
 
-	var flag bool
 	for _, prefix := range plugin.allowSubnet {
-		flag = prefix.Contains(ip)
-		if flag {
-			fmt.Printf("%v contains %v\n", prefix, ip)
-			break
+		if prefix.Contains(ip) {
+			fmt.Printf("[DEBUG] [%s] IP %v входит в подсеть %v\n", plugin.name, ip, prefix)
+			return true
 		}
 	}
-
-	return flag
+	fmt.Printf("[DEBUG] [%s] IP %v не найден в разрешённых подсетях\n", plugin.name, ip)
+	return false
 }
 
-// validate validates the request and returns the HTTP status code or an error if the request is not valid. It also sets any headers that should be forwarded to the backend.
 func (plugin *ICalMiddleware) validate(request *http.Request) (int, error) {
-	if !plugin.containsSubnet(ReadUserIP(request)) {
+	userIP := ReadUserIP(request)
+	fmt.Printf("[DEBUG] [%s] Обработка запроса от IP: %s, URL: %s\n", plugin.name, userIP, request.URL.String())
+
+	if !plugin.containsSubnet(userIP) {
 		token := plugin.extractTokenFromHeader(request)
-		if len(token) != 16 {
-			// No token provided
-			fmt.Println("No token provided")
+		if token == "" {
+			fmt.Printf("[ERROR] [%s] Токен не предоставлен в заголовке '%s' для запроса от IP %s\n", plugin.name, plugin.headerName, userIP)
 			return http.StatusUnauthorized, fmt.Errorf("no token provided")
-		} else if !(plugin.cache.Has(token)) {
-			// Token provided
+		}
+		if len(token) != 16 {
+			fmt.Printf("[ERROR] [%s] Неверная длина токена '%s' для запроса от IP %s\n", plugin.name, token, userIP)
+			return http.StatusUnauthorized, fmt.Errorf("incorrect token len")
+		}
+		if !plugin.cache.Has(token) {
 			err := plugin.httpRequestAndCache(token)
 			if err != nil {
+				fmt.Printf("[ERROR] [%s] Проверка токена '%s' не пройдена для запроса от IP %s: %v\n", plugin.name, token, userIP, err)
 				return http.StatusUnauthorized, err
 			}
+			fmt.Printf("[DEBUG] [%s] Токен '%s' валидирован и кэширован для IP %s\n", plugin.name, token, userIP)
+		} else {
+			fmt.Printf("[DEBUG] [%s] Токен '%s' найден в кэше для IP %s\n", plugin.name, token, userIP)
 		}
-		fmt.Println("Token found in cache")
+	} else {
+		fmt.Printf("[DEBUG] [%s] Запрос от IP %s пропущен без проверки токена (разрешённая подсеть)\n", plugin.name, userIP)
 	}
 	return http.StatusOK, nil
 }
 
 func (plugin *ICalMiddleware) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
-	_, err := plugin.validate(req)
+	status, err := plugin.validate(req)
 	if err != nil {
 		origin := req.Header.Get("Origin")
 		if origin != "" {
@@ -180,7 +197,7 @@ func (plugin *ICalMiddleware) ServeHTTP(rw http.ResponseWriter, req *http.Reques
 			rw.Header().Add("Access-Control-Allow-Headers", "*")
 			rw.Header().Add("Access-Control-Max-Age", "0")
 		}
-		http.Error(rw, "Unauthorized. Attach valid ICal ETIS token in "+plugin.headerName+" header", http.StatusUnauthorized)
+		http.Error(rw, fmt.Sprintf("Unauthorized. Attach valid ICal ETIS token in '%s' header", plugin.headerName), status)
 		return
 	}
 	plugin.next.ServeHTTP(rw, req)
