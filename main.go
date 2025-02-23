@@ -191,6 +191,13 @@ func (plugin *ICalMiddleware) validate(request *http.Request) (int, error) {
 		return http.StatusOK, nil
 	}
 
+	token := plugin.extractTokenFromHeader(request)
+
+	if token != "" && len(token) != 16 && plugin.cache.Has(token) {
+		fmt.Printf("[DEBUG] [%s] Токен '%s' найден в кэше для IP %s\n", plugin.name, token, userIP)
+		return http.StatusOK, nil
+	}
+
 	if plugin.globalLimiter != nil && !plugin.globalLimiter.Allow() {
 		fmt.Printf("[ERROR] [%s] Превышен глобальный лимит запросов\n", plugin.name)
 		return http.StatusTooManyRequests, fmt.Errorf("global rate limit exceeded")
@@ -211,7 +218,6 @@ func (plugin *ICalMiddleware) validate(request *http.Request) (int, error) {
 		}
 	}
 
-	token := plugin.extractTokenFromHeader(request)
 	if token == "" {
 		fmt.Printf("[ERROR] [%s] Токен не предоставлен в заголовке '%s' для запроса от IP %s\n", plugin.name, plugin.headerName, userIP)
 		return http.StatusUnauthorized, fmt.Errorf("no token provided")
@@ -220,16 +226,13 @@ func (plugin *ICalMiddleware) validate(request *http.Request) (int, error) {
 		fmt.Printf("[ERROR] [%s] Неверная длина токена '%s' для запроса от IP %s\n", plugin.name, token, userIP)
 		return http.StatusUnauthorized, fmt.Errorf("incorrect token len")
 	}
-	if !plugin.cache.Has(token) {
-		err := plugin.httpRequestAndCache(token)
-		if err != nil {
-			fmt.Printf("[ERROR] [%s] Проверка токена '%s' не пройдена для запроса от IP %s: %v\n", plugin.name, token, userIP, err)
-			return http.StatusUnauthorized, err
-		}
-		fmt.Printf("[DEBUG] [%s] Токен '%s' валидирован и кэширован для IP %s\n", plugin.name, token, userIP)
-	} else {
-		fmt.Printf("[DEBUG] [%s] Токен '%s' найден в кэше для IP %s\n", plugin.name, token, userIP)
+
+	err := plugin.httpRequestAndCache(token)
+	if err != nil {
+		fmt.Printf("[ERROR] [%s] Проверка токена '%s' не пройдена для запроса от IP %s: %v\n", plugin.name, token, userIP, err)
+		return http.StatusUnauthorized, err
 	}
+	fmt.Printf("[DEBUG] [%s] Токен '%s' валидирован и кэширован для IP %s\n", plugin.name, token, userIP)
 
 	return http.StatusOK, nil
 }
