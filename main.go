@@ -128,10 +128,13 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 	
 	// Create a custom HTTP client with proper timeouts
 	transport := &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout:   timeout / 3,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			dialer := &net.Dialer{
+				Timeout:   timeout / 3,
+				KeepAlive: 30 * time.Second,
+			}
+			return dialer.DialContext(ctx, network, addr)
+		},
 		MaxIdleConns:          100,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   timeout / 3,
