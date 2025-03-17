@@ -11,68 +11,45 @@ import (
 )
 
 const (
-	// For use with functions that take an expiration time.
+	// NoExpiration indicates that the item never expires
 	NoExpiration time.Duration = -1
 
-	// For use with functions that take an expiration time. Equivalent to
-	// passing in the same expiration duration as was given to New() or
-	// NewFrom() when the cache was created (e.g. 5 minutes.)
+	// DefaultExpiration indicates to use the default expiration time
 	DefaultExpiration time.Duration = 0
 )
 
+// Item represents a cache item
 type Item struct {
-	Object     bool
-	Expiration int64
+	Object     bool      // The cached value
+	Expiration int64     // When the item expires (Unix nano time)
+	LastAccess time.Time // When the item was last accessed
 }
 
-// Expired returns true if the item has expired.
+// Expired returns true if the item has expired
 func (item Item) Expired() bool {
 	if item.Expiration == 0 {
 		return false
 	}
-
 	return time.Now().UnixNano() > item.Expiration
 }
 
+// Cache is the main cache structure
 type Cache struct {
 	*cache
 }
 
-// New returns a new cache with a given default expiration duration and cleanup
-// interval. If the expiration duration is less than one (or NoExpiration),
-// the items in the cache never expire (by default), and must be deleted
-// manually. If the cleanup interval is less than one, expired items are not
-// deleted from the cache before calling c.DeleteExpired().
+// NewCache creates a new cache with the given expiration and cleanup interval
 func NewCache(defaultExpiration, cleanupInterval time.Duration) *Cache {
-	items := make(map[string]Item)
+	items := make(map[string]Item, 100) // Pre-allocate space for better performance
 	return newCacheWithJanitor(defaultExpiration, cleanupInterval, items)
 }
 
-// NewFrom returns a new cache with a given default expiration duration and cleanup
-// interval. If the expiration duration is less than one (or NoExpiration),
-// the items in the cache never expire (by default), and must be deleted
-// manually. If the cleanup interval is less than one, expired items are not
-// deleted from the cache before calling c.DeleteExpired().
-//
-// NewFrom() also accepts an items map which will serve as the underlying map
-// for the cache. This is useful for starting from a deserialized cache
-// (serialized using e.g. gob.Encode() on c.Items()), or passing in e.g.
-// make(map[string]Item, 500) to improve startup performance when the cache
-// is expected to reach a certain minimum size.
-//
-// Only the cache's methods synchronize access to this map, so it is not
-// recommended to keep any references to the map around after creating a cache.
-// If need be, the map can be accessed at a later point using c.Items() (subject
-// to the same caveat.)
-//
-// Note regarding serialization: When using e.g. gob, make sure to
-// gob.Register() the individual types stored in the cache before encoding a
-// map retrieved with c.Items(), and to register those same types before
-// decoding a blob containing an items map.
+// NewFrom creates a new cache with the given expiration, cleanup interval, and items
 func NewFrom(defaultExpiration, cleanupInterval time.Duration, items map[string]Item) *Cache {
 	return newCacheWithJanitor(defaultExpiration, cleanupInterval, items)
 }
 
+// cache is the internal cache implementation
 type cache struct {
 	defaultExpiration time.Duration
 	items             map[string]Item
@@ -81,6 +58,7 @@ type cache struct {
 	janitor           *janitor
 }
 
+// newCache creates a new cache with the given expiration and items
 func newCache(de time.Duration, m map[string]Item) *cache {
 	if de == 0 {
 		de = -1
@@ -92,6 +70,7 @@ func newCache(de time.Duration, m map[string]Item) *cache {
 	return c
 }
 
+// newCacheWithJanitor creates a new cache with a janitor goroutine
 func newCacheWithJanitor(de time.Duration, ci time.Duration, m map[string]Item) *Cache {
 	c := newCache(de, m)
 	// This trick ensures that the janitor goroutine (which--granted it
@@ -109,9 +88,7 @@ func newCacheWithJanitor(de time.Duration, ci time.Duration, m map[string]Item) 
 	return C
 }
 
-// Add an item to the cache, replacing any existing item. If the duration is 0
-// (DefaultExpiration), the cache's default expiration time is used. If it is -1
-// (NoExpiration), the item never expires.
+// Set adds an item to the cache
 func (c *cache) Set(k string, x bool, d time.Duration) {
 	// "Inlining" of set
 	var e int64
@@ -125,12 +102,12 @@ func (c *cache) Set(k string, x bool, d time.Duration) {
 	c.items[k] = Item{
 		Object:     x,
 		Expiration: e,
+		LastAccess: time.Now(),
 	}
-	// TODO: Calls to mu.Unlock are currently not deferred because defer
-	// adds ~200 ns (as of go1.)
 	c.mu.Unlock()
 }
 
+// set is an internal method to set a cache item
 func (c *cache) set(k string, x bool, d time.Duration) {
 	var e int64
 	if d == DefaultExpiration {
@@ -142,17 +119,16 @@ func (c *cache) set(k string, x bool, d time.Duration) {
 	c.items[k] = Item{
 		Object:     x,
 		Expiration: e,
+		LastAccess: time.Now(),
 	}
 }
 
-// Add an item to the cache, replacing any existing item, using the default
-// expiration.
+// SetDefault adds an item to the cache with the default expiration
 func (c *cache) SetDefault(k string, x bool) {
 	c.Set(k, x, DefaultExpiration)
 }
 
-// Add an item to the cache only if an item doesn't already exist for the given
-// key, or if the existing item has expired. Returns an error otherwise.
+// Add adds an item to the cache only if it doesn't already exist
 func (c *cache) Add(k string, x bool, d time.Duration) error {
 	c.mu.Lock()
 	_, found := c.get(k)
@@ -165,8 +141,7 @@ func (c *cache) Add(k string, x bool, d time.Duration) error {
 	return nil
 }
 
-// Set a new value for the cache key only if it already exists, and the existing
-// item hasn't expired. Returns an error otherwise.
+// Replace replaces an existing item in the cache
 func (c *cache) Replace(k string, x bool, d time.Duration) error {
 	c.mu.Lock()
 	_, found := c.get(k)
@@ -179,13 +154,13 @@ func (c *cache) Replace(k string, x bool, d time.Duration) error {
 	return nil
 }
 
+// Has checks if an item exists in the cache
 func (c *cache) Has(k string) bool {
 	_, has := c.Get(k)
 	return has
 }
 
-// Get an item from the cache. Returns the item or nil, and a bool indicating
-// whether the key was found.
+// Get retrieves an item from the cache
 func (c *cache) Get(k string) (bool, bool) {
 	c.mu.RLock()
 	// "Inlining" of get and Expired
@@ -201,13 +176,19 @@ func (c *cache) Get(k string) (bool, bool) {
 		}
 	}
 	c.mu.RUnlock()
+	
+	// Update last access time
+	c.mu.Lock()
+	if item, found := c.items[k]; found {
+		item.LastAccess = time.Now()
+		c.items[k] = item
+	}
+	c.mu.Unlock()
+	
 	return item.Object, true
 }
 
-// GetWithExpiration returns an item and its expiration time from the cache.
-// It returns the item or nil, the expiration time if one is set (if the item
-// never expires a zero value for time.Time is returned), and a bool indicating
-// whether the key was found.
+// GetWithExpiration retrieves an item and its expiration time
 func (c *cache) GetWithExpiration(k string) (interface{}, time.Time, bool) {
 	c.mu.RLock()
 	// "Inlining" of get and Expired
@@ -225,15 +206,34 @@ func (c *cache) GetWithExpiration(k string) (interface{}, time.Time, bool) {
 
 		// Return the item and the expiration time
 		c.mu.RUnlock()
+		
+		// Update last access time
+		c.mu.Lock()
+		if item, found := c.items[k]; found {
+			item.LastAccess = time.Now()
+			c.items[k] = item
+		}
+		c.mu.Unlock()
+		
 		return item.Object, time.Unix(0, item.Expiration), true
 	}
 
 	// If expiration <= 0 (i.e. no expiration time set) then return the item
 	// and a zeroed time.Time
 	c.mu.RUnlock()
+	
+	// Update last access time
+	c.mu.Lock()
+	if item, found := c.items[k]; found {
+		item.LastAccess = time.Now()
+		c.items[k] = item
+	}
+	c.mu.Unlock()
+	
 	return item.Object, time.Time{}, true
 }
 
+// get is an internal method to get an item from the cache
 func (c *cache) get(k string) (bool, bool) {
 	item, found := c.items[k]
 	if !found {
@@ -248,7 +248,7 @@ func (c *cache) get(k string) (bool, bool) {
 	return item.Object, true
 }
 
-// Delete an item from the cache. Does nothing if the key is not in the cache.
+// Delete removes an item from the cache
 func (c *cache) Delete(k string) {
 	c.mu.Lock()
 	v, evicted := c.delete(k)
@@ -258,6 +258,7 @@ func (c *cache) Delete(k string) {
 	}
 }
 
+// delete is an internal method to delete an item from the cache
 func (c *cache) delete(k string) (bool, bool) {
 	if c.onEvicted != nil {
 		if v, found := c.items[k]; found {
@@ -267,17 +268,16 @@ func (c *cache) delete(k string) (bool, bool) {
 	}
 
 	delete(c.items, k)
-
-	var result bool
-	return result, false
+	return false, false
 }
 
+// keyAndValue represents a key-value pair
 type keyAndValue struct {
 	key   string
 	value bool
 }
 
-// DeleteExpired deletes all expired items from the cache.
+// DeleteExpired deletes all expired items from the cache
 func (c *cache) DeleteExpired() {
 	var evictedItems []keyAndValue
 	now := time.Now().UnixNano()
@@ -297,24 +297,78 @@ func (c *cache) DeleteExpired() {
 	}
 }
 
-// Sets an (optional) function that is called with the key and value when an
-// item is evicted from the cache. (Including when it is deleted manually, but
-// not when it is overwritten.) Set to nil to disable.
+// DeleteLeastRecent removes the least recently accessed items when the cache exceeds the given size
+func (c *cache) DeleteLeastRecent(maxSize int) {
+	if len(c.items) <= maxSize {
+		return
+	}
+	
+	// Find items to delete
+	var itemsToDelete []string
+	var oldestTime time.Time
+	var oldestKey string
+	
+	c.mu.RLock()
+	// Initialize with the first item
+	for k, v := range c.items {
+		oldestTime = v.LastAccess
+		oldestKey = k
+		break
+	}
+	
+	// Find the oldest items
+	for len(c.items) - len(itemsToDelete) > maxSize {
+		// Find the oldest item
+		for k, v := range c.items {
+			if v.LastAccess.Before(oldestTime) && !contains(itemsToDelete, k) {
+				oldestTime = v.LastAccess
+				oldestKey = k
+			}
+		}
+		itemsToDelete = append(itemsToDelete, oldestKey)
+		
+		// Reset for next iteration
+		oldestTime = time.Now()
+		for k, v := range c.items {
+			if v.LastAccess.Before(oldestTime) && !contains(itemsToDelete, k) {
+				oldestTime = v.LastAccess
+				oldestKey = k
+			}
+		}
+	}
+	c.mu.RUnlock()
+	
+	// Delete the items
+	c.mu.Lock()
+	for _, k := range itemsToDelete {
+		delete(c.items, k)
+	}
+	c.mu.Unlock()
+}
+
+// contains checks if a string is in a slice
+func contains(slice []string, item string) bool {
+	for _, s := range slice {
+		if s == item {
+			return true
+		}
+	}
+	return false
+}
+
+// OnEvicted sets a callback for when items are evicted
 func (c *cache) OnEvicted(f func(string, bool)) {
 	c.mu.Lock()
 	c.onEvicted = f
 	c.mu.Unlock()
 }
 
-// Write the cache's items (using Gob) to an io.Writer.
-//
-// NOTE: This method is deprecated in favor of c.Items() and NewFrom() (see the
-// documentation for NewFrom().)
+// Save serializes the cache to an io.Writer
 func (c *cache) Save(w io.Writer) (err error) {
 	enc := gob.NewEncoder(w)
 	defer func() {
 		if x := recover(); x != nil {
-			err = fmt.Errorf("Error registering item types with Gob library")
+			err = fmt.Errorf("error registering item types with Gob library")
 		}
 	}()
 	c.mu.RLock()
@@ -326,11 +380,7 @@ func (c *cache) Save(w io.Writer) (err error) {
 	return
 }
 
-// Save the cache's items to the given filename, creating the file if it
-// doesn't exist, and overwriting it if it does.
-//
-// NOTE: This method is deprecated in favor of c.Items() and NewFrom() (see the
-// documentation for NewFrom().)
+// SaveFile saves the cache to a file
 func (c *cache) SaveFile(fname string) error {
 	fp, err := os.Create(fname)
 	if err != nil {
@@ -344,11 +394,7 @@ func (c *cache) SaveFile(fname string) error {
 	return fp.Close()
 }
 
-// Add (Gob-serialized) cache items from an io.Reader, excluding any items with
-// keys that already exist (and haven't expired) in the current cache.
-//
-// NOTE: This method is deprecated in favor of c.Items() and NewFrom() (see the
-// documentation for NewFrom().)
+// Load deserializes the cache from an io.Reader
 func (c *cache) Load(r io.Reader) error {
 	dec := gob.NewDecoder(r)
 	items := map[string]Item{}
@@ -366,11 +412,7 @@ func (c *cache) Load(r io.Reader) error {
 	return err
 }
 
-// Load and add cache items from the given filename, excluding any items with
-// keys that already exist in the current cache.
-//
-// NOTE: This method is deprecated in favor of c.Items() and NewFrom() (see the
-// documentation for NewFrom().)
+// LoadFile loads the cache from a file
 func (c *cache) LoadFile(fname string) error {
 	fp, err := os.Open(fname)
 	if err != nil {
@@ -384,7 +426,7 @@ func (c *cache) LoadFile(fname string) error {
 	return fp.Close()
 }
 
-// Items copies all unexpired items in the cache into a new map and returns it.
+// Items returns all unexpired items in the cache
 func (c *cache) Items() map[string]Item {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -402,8 +444,7 @@ func (c *cache) Items() map[string]Item {
 	return m
 }
 
-// Returns the number of items in the cache. This may include items that have
-// expired, but have not yet been cleaned up.
+// ItemCount returns the number of items in the cache
 func (c *cache) ItemCount() int {
 	c.mu.RLock()
 	n := len(c.items)
@@ -411,24 +452,28 @@ func (c *cache) ItemCount() int {
 	return n
 }
 
-// Flush deletes all items from the cache.
+// Flush removes all items from the cache
 func (c *cache) Flush() {
 	c.mu.Lock()
 	c.items = map[string]Item{}
 	c.mu.Unlock()
 }
 
+// janitor cleans up expired items at regular intervals
 type janitor struct {
 	Interval time.Duration
 	stop     chan bool
 }
 
+// Run runs the janitor
 func (j *janitor) Run(c *cache) {
 	ticker := time.NewTicker(j.Interval)
 	for {
 		select {
 		case <-ticker.C:
 			c.DeleteExpired()
+			// Also clean up if the cache gets too big (more than 10000 items)
+			c.DeleteLeastRecent(10000)
 		case <-j.stop:
 			ticker.Stop()
 			return
@@ -436,10 +481,12 @@ func (j *janitor) Run(c *cache) {
 	}
 }
 
+// stopJanitor stops the janitor
 func stopJanitor(c *Cache) {
 	c.janitor.stop <- true
 }
 
+// runJanitor starts the janitor
 func runJanitor(c *cache, ci time.Duration) {
 	j := &janitor{
 		Interval: ci,
